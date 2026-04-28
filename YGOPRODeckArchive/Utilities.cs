@@ -270,14 +270,19 @@ internal sealed class ArchiveLogger : IAsyncDisposable
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly StreamWriter _latestWriter;
     private readonly StreamWriter _historyWriter;
+    private readonly ArchiveConsoleProgress? _consoleProgress;
 
-    private ArchiveLogger(StreamWriter latestWriter, StreamWriter historyWriter)
+    private ArchiveLogger(StreamWriter latestWriter, StreamWriter historyWriter, ArchiveConsoleProgress? consoleProgress)
     {
         _latestWriter = latestWriter;
         _historyWriter = historyWriter;
+        _consoleProgress = consoleProgress;
     }
 
-    public static async Task<ArchiveLogger> CreateAsync(ArchiveLayout layout, CancellationToken cancellationToken)
+    public static async Task<ArchiveLogger> CreateAsync(
+        ArchiveLayout layout,
+        ArchiveConsoleProgress? consoleProgress,
+        CancellationToken cancellationToken)
     {
         string runHistoryFileName = $"archive-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.log";
         string runHistoryPath = Path.Combine(layout.RunHistoryDirectory, runHistoryFileName);
@@ -292,7 +297,7 @@ internal sealed class ArchiveLogger : IAsyncDisposable
             AutoFlush = true
         };
 
-        ArchiveLogger logger = new(latestWriter, historyWriter);
+        ArchiveLogger logger = new(latestWriter, historyWriter, consoleProgress);
         await logger.InfoAsync("Starting archive run.", cancellationToken);
         return logger;
     }
@@ -332,7 +337,15 @@ internal sealed class ArchiveLogger : IAsyncDisposable
 
         try
         {
-            Console.WriteLine(line);
+            if (_consoleProgress is null)
+            {
+                Console.WriteLine(line);
+            }
+            else if (!string.Equals(level, "PROGRESS", StringComparison.OrdinalIgnoreCase))
+            {
+                _consoleProgress.WriteLogLine(level, line);
+            }
+
             await _latestWriter.WriteLineAsync(line);
             await _historyWriter.WriteLineAsync(line);
         }

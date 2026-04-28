@@ -19,6 +19,7 @@ internal sealed class ArchiveRunner
 
     private ArchiveLayout? _layout;
     private ArchiveLogger? _logger;
+    private ArchiveConsoleProgress? _consoleProgress;
     private YgoProDeckApiClient? _apiClient;
     private ArchiveStateDocument _state = new();
     private readonly Dictionary<int, CardIndexEntryDocument> _cardIndex = [];
@@ -29,8 +30,17 @@ internal sealed class ArchiveRunner
 
     public async Task<int> RunAsync(CliOptions options, CancellationToken cancellationToken)
     {
+        return await ArchiveConsoleProgress.RunAsync(progress => RunCoreAsync(options, progress, cancellationToken));
+    }
+
+    private async Task<int> RunCoreAsync(
+        CliOptions options,
+        ArchiveConsoleProgress? consoleProgress,
+        CancellationToken cancellationToken)
+    {
         _layout = ArchivePaths.Create(options.RootPath);
-        await using ArchiveLogger logger = await ArchiveLogger.CreateAsync(_layout, cancellationToken);
+        _consoleProgress = consoleProgress;
+        await using ArchiveLogger logger = await ArchiveLogger.CreateAsync(_layout, consoleProgress, cancellationToken);
         await using YgoProDeckApiClient apiClient = new();
 
         _logger = logger;
@@ -63,6 +73,7 @@ internal sealed class ArchiveRunner
             await _logger.InfoAsync($"Page size: {options.PageSize}", cancellationToken);
             await _logger.InfoAsync($"Keep raw pages: {options.KeepRawPages}", cancellationToken);
             await _logger.InfoAsync($"Force refresh: {options.ForceRefresh}", cancellationToken);
+            _consoleProgress?.SetActivity("Preparing archive");
             await LogRunStartSummaryAsync(cancellationToken);
 
             (List<NormalizedSetDefinition> setDefinitions, DatasetStateDocument setsDataset) = await LoadSetDefinitionsAsync(options, cancellationToken);
@@ -203,6 +214,7 @@ internal sealed class ArchiveRunner
         CancellationToken cancellationToken)
     {
         DatasetStateDocument dataset = await StartDatasetAsync("sets", cancellationToken);
+        _consoleProgress?.SetActivity("Fetching set list");
         await _logger!.ProgressAsync("Fetching set list from YGOPRODeck...", cancellationToken);
 
         ApiResponse<List<CardSetListItemDto>> response = await _apiClient!.GetSetListAsync(cancellationToken);
@@ -275,6 +287,8 @@ internal sealed class ArchiveRunner
             _stateGate.Release();
         }
 
+        _consoleProgress?.RegisterSetTotal(normalizedSets.Count);
+        _consoleProgress?.SetActivity("Sets loaded");
         await _logger.ProgressAsync($"Loaded {normalizedSets.Count:N0} sets from the API.", cancellationToken);
         return (normalizedSets, dataset);
     }
@@ -311,6 +325,7 @@ internal sealed class ArchiveRunner
         int offset = 0;
         int pageNumber = 1;
 
+        _consoleProgress?.SetActivity($"Cards {language}");
         await _logger!.ProgressAsync($"Starting {language} card archive...", cancellationToken);
 
         Task<ApiResponse<CardInfoPageDto>> currentPageTask = _apiClient!.GetCardPageAsync(language, options.PageSize, offset, cancellationToken);
@@ -549,6 +564,7 @@ internal sealed class ArchiveRunner
         }
 
         await _logger!.ProgressAsync(summaryMessage, cancellationToken);
+        _consoleProgress?.AdvanceOverall(outcomes.Count, summaryMessage);
     }
 
     private async Task CompleteDatasetAsync(DatasetStateDocument dataset, CancellationToken cancellationToken)
@@ -575,6 +591,8 @@ internal sealed class ArchiveRunner
         CliOptions options,
         CancellationToken cancellationToken)
     {
+        _consoleProgress?.RegisterSetTotal(setDefinitions.Count);
+        _consoleProgress?.SetActivity("Writing set folders");
         await _logger!.ProgressAsync($"Writing {setDefinitions.Count:N0} set folders...", cancellationToken);
 
         int processedSets = 0;
@@ -636,6 +654,8 @@ internal sealed class ArchiveRunner
                 {
                     await _logger.ProgressAsync(progressMessage, innerCancellationToken);
                 }
+
+                _consoleProgress?.AdvanceOverall(1, $"sets {processedSetCount:N0}/{setDefinitions.Count:N0}");
 
                 if (!string.IsNullOrWhiteSpace(outcome.ErrorMessage))
                 {
@@ -767,9 +787,7 @@ internal sealed class ArchiveRunner
                 await _logger!.ProgressAsync($"Downloading card assets for {cardId} - {cardName} ({imagePart})", cancellationToken);
             }
 
-            string assetLabelPrefix = uniqueImages.Count > 1
-                ? $"card {cardId} - {cardName} (image set {index + 1:N0}/{uniqueImages.Count:N0})"
-                : $"card {cardId} - {cardName}";
+            string assetLabelPrefix = $"card {cardId}";
 
             Task<ArchivedFileResult> fullTask = ArchiveRemoteFileAsync(
                 imagesDirectory,
@@ -846,6 +864,8 @@ internal sealed class ArchiveRunner
 
         try
         {
+            _consoleProgress?.DownloadStarted(assetLabel);
+
             try
             {
                 await _apiClient!.DownloadFileAsync(sourceUrl, destinationPath, cancellationToken);
@@ -864,6 +884,7 @@ internal sealed class ArchiveRunner
         }
         finally
         {
+            _consoleProgress?.DownloadCompleted(assetLabel);
             _downloadLimiter.Release();
         }
 
@@ -1120,12 +1141,15 @@ internal sealed class ArchiveRunner
 
         if (page.Meta?.TotalRows is int totalRows && totalRows > 0)
         {
+            _consoleProgress?.RegisterDatasetTotal(datasetName, totalRows);
             int start = Math.Min(totalRows, offset + 1);
             int end = Math.Min(totalRows, offset + page.Data.Count);
+            _consoleProgress?.SetActivity($"{datasetName} page {pagePart}");
             await _logger!.ProgressAsync($"{datasetName} page {pagePart} - processing cards {start:N0}-{end:N0} of {totalRows:N0}", cancellationToken);
             return;
         }
 
+        _consoleProgress?.SetActivity($"{datasetName} page {pagePart}");
         await _logger!.ProgressAsync($"{datasetName} page {pagePart} - processing {page.Data.Count:N0} cards", cancellationToken);
     }
 
